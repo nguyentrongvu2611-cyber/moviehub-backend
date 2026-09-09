@@ -12,3 +12,4 @@ bcrypt
 python-jose[cryptography]
 python-multipart
 imageio-ffmpeg
+fastapi-mail
