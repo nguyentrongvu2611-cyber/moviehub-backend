@@ -3,6 +3,7 @@ import uuid
 import asyncio
 import aiofiles
 import ffmpeg
+import shutil
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, BackgroundTasks, status
 from sqlalchemy.orm import Session
@@ -43,18 +44,17 @@ def get_movie_detail(movie_id: int, db: Session = Depends(get_db)):
     return format_movie_response(movie, db)
 
 def transcode_video_sync(input_path: str, output_folder: str):
-    """Hàm convert chạy đồng bộ bằng ffmpeg"""
     resolutions = {
         "720p": ("1280x720", "1M"),
         "480p": ("854x480", "500k")
     }
     
-    # Chỉ định đường dẫn tuyệt đối đến file ffmpeg.exe từ WinGet
-    ffmpeg_exe = r"C:\Users\nguye\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+    # Render/Linux sẽ tìm thấy lệnh 'ffmpeg' qua shutil.which("ffmpeg")
+    # Trên Windows local sẽ dùng đường dẫn WinGet làm dự phòng
+    ffmpeg_exe = shutil.which("ffmpeg") or r"C:\Users\nguye\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
 
     for quality, (scale, bitrate) in resolutions.items():
         output_path = os.path.join(output_folder, f"{quality}.mp4")
-        print(f"--> [FFmpeg] Bắt đầu convert {quality}...")
         try:
             (
                 ffmpeg
@@ -63,7 +63,6 @@ def transcode_video_sync(input_path: str, output_folder: str):
                 .overwrite_output()
                 .run(cmd=ffmpeg_exe, capture_stdout=True, capture_stderr=True)
             )
-            print(f"--> [FFmpeg] Hoàn tất convert {quality}!")
         except ffmpeg.Error as e:
             print(f"Lỗi FFmpeg khi render {quality}: {e.stderr.decode('utf-8') if e.stderr else str(e)}")
         except Exception as e:
