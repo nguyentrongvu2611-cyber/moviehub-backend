@@ -19,9 +19,9 @@ from app.schemas.movie import MovieCreate, MovieResponse, MovieUpdate
 from app.schemas.comment import CommentCreate, CommentResponse, MovieCommentsSummary
 from app.core.security import get_current_user  
 from app.models.user import User
+
 router = APIRouter()
 
-# Đường dẫn uploads tính từ thư mục gốc
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../../.."))
 UPLOAD_DIR = os.path.join(PROJECT_ROOT, "uploads")
@@ -32,16 +32,8 @@ class MovieSectionUpdate(BaseModel):
 
 
 # ==========================================
-# HÀM BỔ TRỢ NÉN VIDEO VỚI FFMPEG
+# HÀM BỔ TRỢ & FORMAT RESPONSE
 # ==========================================
-@router.get("/{movie_id}", response_model=MovieResponse)
-def get_movie_detail(movie_id: int, db: Session = Depends(get_db)):
-    """Lấy thông tin chi tiết của 1 bộ phim theo ID"""
-    movie = db.query(Movie).filter(Movie.id == movie_id).first()
-    if not movie:
-        raise HTTPException(status_code=404, detail="Không tìm thấy phim")
-    
-    return format_movie_response(movie, db)
 
 def transcode_video_sync(input_path: str, output_folder: str):
     resolutions = {
@@ -49,8 +41,6 @@ def transcode_video_sync(input_path: str, output_folder: str):
         "480p": ("854x480", "500k")
     }
     
-    # Render/Linux sẽ tìm thấy lệnh 'ffmpeg' qua shutil.which("ffmpeg")
-    # Trên Windows local sẽ dùng đường dẫn WinGet làm dự phòng
     ffmpeg_exe = shutil.which("ffmpeg") or r"C:\Users\nguye\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
 
     for quality, (scale, bitrate) in resolutions.items():
@@ -69,80 +59,8 @@ def transcode_video_sync(input_path: str, output_folder: str):
             print(f"Lỗi hệ thống khi render {quality}: {str(e)}")
 
 async def run_transcode(input_path: str, output_folder: str):
-    """Đưa hàm transcode vào ThreadPool để tránh treo server"""
     await asyncio.to_thread(transcode_video_sync, input_path, output_folder)
 
-
-# ==========================================
-# 1. UPLOAD MEDIA (POSTERS & VIDEOS)
-# ==========================================
-
-@router.post("/upload-video")
-async def upload_video(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
-    """Upload video phim và tự động nén ra 720p & 480p dưới background"""
-    video_id = str(uuid.uuid4())
-    movie_folder = os.path.join(UPLOAD_DIR, "videos", video_id)
-    os.makedirs(movie_folder, exist_ok=True)
-
-    # 1. Ghi file gốc bất đồng bộ thành 1080p.mp4
-    original_path = os.path.join(movie_folder, "1080p.mp4")
-    try:
-        async with aiofiles.open(original_path, 'wb') as out_file:
-            while content := await file.read(1024 * 1024):
-                await out_file.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi lưu video gốc: {str(e)}")
-
-    # 2. Đẩy tác vụ nén sang 720p & 480p vào Background Task
-    background_tasks.add_task(run_transcode, original_path, movie_folder)
-
-    p_1080 = f"/uploads/videos/{video_id}/1080p.mp4"
-    p_720 = f"/uploads/videos/{video_id}/720p.mp4"
-    p_480 = f"/uploads/videos/{video_id}/480p.mp4"
-
-    return {
-        "message": "Upload video gốc thành công. Đang xử lý nén các bản 720p và 480p ở background...",
-        "video_id": video_id,
-        "video_url": p_1080,
-        "video_urls": {
-            "1080p": p_1080,
-            "720p": p_720,
-            "480p": p_480
-        }
-    }
-
-
-@router.post("/upload-poster")
-async def upload_poster(
-    file: UploadFile = File(...)
-):
-    """Upload ảnh poster phim vào folder uploads/posters"""
-    poster_dir = os.path.join(UPLOAD_DIR, "posters")
-    os.makedirs(poster_dir, exist_ok=True)
-
-    ext = os.path.splitext(file.filename)[1] or ".jpg"
-    file_name = f"{uuid.uuid4()}{ext}"
-    file_path = os.path.join(poster_dir, file_name)
-
-    try:
-        async with aiofiles.open(file_path, 'wb') as out_file:
-            while content := await file.read(1024 * 1024):
-                await out_file.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi lưu poster: {str(e)}")
-
-    return {
-        "message": "Upload poster thành công",
-        "poster_url": f"/uploads/posters/{file_name}"
-    }
-
-
-# ==========================================
-# 2. QUẢN LÝ PHIM (CRUD MOVIES)
-# ==========================================
 
 def format_movie_response(movie: Movie, db: Session) -> dict:
     views_count = db.query(func.count(MovieView.id)).filter(
@@ -173,42 +91,72 @@ def format_movie_response(movie: Movie, db: Session) -> dict:
     }
 
 
-@router.post("/", response_model=MovieResponse)
-def create_movie(
-    movie: MovieCreate,
-    db: Session = Depends(get_db)
+# ==========================================
+# 1. UPLOAD MEDIA
+# ==========================================
+
+@router.post("/upload-video")
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...)
 ):
-    category = db.query(Category).filter(Category.id == movie.category_id).first()
-    if not category:
-        raise HTTPException(status_code=404, detail="Không tìm thấy thể loại")
+    video_id = str(uuid.uuid4())
+    movie_folder = os.path.join(UPLOAD_DIR, "videos", video_id)
+    os.makedirs(movie_folder, exist_ok=True)
 
-    video_urls = movie.video_urls
-    if not video_urls and movie.video_url:
-        video_urls = {"1080p": movie.video_url}
+    original_path = os.path.join(movie_folder, "1080p.mp4")
+    try:
+        async with aiofiles.open(original_path, 'wb') as out_file:
+            while content := await file.read(1024 * 1024):
+                await out_file.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi lưu video gốc: {str(e)}")
 
-    new_movie = Movie(
-        title=movie.title,
-        description=movie.description,
-        year=movie.year,
-        duration=movie.duration,
-        quality=movie.quality,
-        director=movie.director,
-        poster_url=movie.poster_url,
-        video_url=movie.video_url,
-        video_urls=video_urls,
-        category_id=movie.category_id,
-        is_free=movie.is_free,
-        movie_type=movie.movie_type or "single",
-        country=movie.country or "vn",
-        section_type=movie.section_type or "feature"
-    )
+    background_tasks.add_task(run_transcode, original_path, movie_folder)
 
-    db.add(new_movie)
-    db.commit()
-    db.refresh(new_movie)
+    p_1080 = f"/uploads/videos/{video_id}/1080p.mp4"
+    p_720 = f"/uploads/videos/{video_id}/720p.mp4"
+    p_480 = f"/uploads/videos/{video_id}/480p.mp4"
 
-    return format_movie_response(new_movie, db)
+    return {
+        "message": "Upload video gốc thành công. Đang xử lý nén các bản 720p và 480p ở background...",
+        "video_id": video_id,
+        "video_url": p_1080,
+        "video_urls": {
+            "1080p": p_1080,
+            "720p": p_720,
+            "480p": p_480
+        }
+    }
 
+
+@router.post("/upload-poster")
+async def upload_poster(
+    file: UploadFile = File(...)
+):
+    poster_dir = os.path.join(UPLOAD_DIR, "posters")
+    os.makedirs(poster_dir, exist_ok=True)
+
+    ext = os.path.splitext(file.filename)[1] or ".jpg"
+    file_name = f"{uuid.uuid4()}{ext}"
+    file_path = os.path.join(poster_dir, file_name)
+
+    try:
+        async with aiofiles.open(file_path, 'wb') as out_file:
+            while content := await file.read(1024 * 1024):
+                await out_file.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi khi lưu poster: {str(e)}")
+
+    return {
+        "message": "Upload poster thành công",
+        "poster_url": f"/uploads/posters/{file_name}"
+    }
+
+
+# ==========================================
+# 2. QUẢN LÝ PHIM (ROUTE TĨNH VÀ DANH SÁCH ĐẶT TRƯỚC)
+# ==========================================
 
 @router.get("/search", response_model=list[MovieResponse])
 def search_movies(
@@ -225,6 +173,7 @@ def search_movies(
     return [format_movie_response(m, db) for m in movies]
 
 
+@router.get("", response_model=list[MovieResponse])
 @router.get("/", response_model=list[MovieResponse])
 def get_movies(
     section_type: Optional[str] = Query(None, description="Lọc theo section_type"),
@@ -263,31 +212,78 @@ def get_movies(
     return [format_movie_response(m, db) for m in movies]
 
 
+@router.post("", response_model=MovieResponse)
+@router.post("/", response_model=MovieResponse)
+def create_movie(
+    movie: MovieCreate,
+    db: Session = Depends(get_db)
+):
+    category = db.query(Category).filter(Category.id == movie.category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Không tìm thấy thể loại")
+
+    video_urls = movie.video_urls
+    if not video_urls and movie.video_url:
+        video_urls = {"1080p": movie.video_url}
+
+    new_movie = Movie(
+        title=movie.title,
+        description=movie.description,
+        year=movie.year,
+        duration=movie.duration,
+        quality=movie.quality,
+        director=movie.director,
+        poster_url=movie.poster_url,
+        video_url=movie.video_url,
+        video_urls=video_urls,
+        category_id=movie.category_id,
+        is_free=movie.is_free,
+        movie_type=movie.movie_type or "single",
+        country=movie.country or "vn",
+        section_type=movie.section_type or "feature"
+    )
+
+    db.add(new_movie)
+    db.commit()
+    db.refresh(new_movie)
+
+    return format_movie_response(new_movie, db)
+
+
+# ==========================================
+# 3. CÁC ROUTE NHẬN THAM SỐ {movie_id} (ĐẶT PHÍA SAU)
+# ==========================================
+
+@router.get("/{movie_id}", response_model=MovieResponse)
+def get_movie_detail(movie_id: int, db: Session = Depends(get_db)):
+    movie = db.query(Movie).filter(Movie.id == movie_id).first()
+    if not movie:
+        raise HTTPException(status_code=404, detail="Không tìm thấy phim")
+    
+    return format_movie_response(movie, db)
+
+
 @router.put("/{movie_id}", response_model=MovieResponse)
 def update_movie(
     movie_id: int,
-    movie_data: MovieUpdate,  # Sửa từ MovieCreate thành MovieUpdate
+    movie_data: MovieUpdate,
     db: Session = Depends(get_db)
 ):
     movie = db.query(Movie).filter(Movie.id == movie_id).first()
     if not movie:
         raise HTTPException(status_code=404, detail="Không tìm thấy phim")
 
-    # Bọc trong dict để chỉ cập nhật các trường được gửi lên (bỏ qua None)
     update_data = movie_data.model_dump(exclude_unset=True)
 
-    # Nếu có cập nhật category_id thì kiểm tra xem thể loại có tồn tại không
     if "category_id" in update_data and update_data["category_id"] is not None:
         category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
         if not category:
             raise HTTPException(status_code=404, detail="Không tìm thấy thể loại")
 
-    # Xử lý tự động sinh video_urls nếu chỉ truyền video_url lẻ
     if "video_url" in update_data and "video_urls" not in update_data:
         if update_data["video_url"]:
             update_data["video_urls"] = {"1080p": update_data["video_url"]}
 
-    # Cập nhật các trường dữ liệu vào model
     for field, value in update_data.items():
         setattr(movie, field, value)
 
@@ -314,45 +310,6 @@ def update_movie_section(
     return format_movie_response(movie, db)
 
 
-@router.put("/{movie_id}", response_model=MovieResponse)
-def update_movie(
-    movie_id: int,
-    movie_data: MovieCreate,
-    db: Session = Depends(get_db)
-):
-    movie = db.query(Movie).filter(Movie.id == movie_id).first()
-    if not movie:
-        raise HTTPException(status_code=404, detail="Không tìm thấy phim")
-
-    category = db.query(Category).filter(Category.id == movie_data.category_id).first()
-    if not category:
-        raise HTTPException(status_code=404, detail="Không tìm thấy thể loại")
-
-    video_urls = movie_data.video_urls
-    if not video_urls and movie_data.video_url:
-        video_urls = {"1080p": movie_data.video_url}
-
-    movie.title = movie_data.title
-    movie.description = movie_data.description
-    movie.year = movie_data.year
-    movie.duration = movie_data.duration
-    movie.quality = movie_data.quality
-    movie.director = movie_data.director
-    movie.poster_url = movie_data.poster_url
-    movie.video_url = movie_data.video_url
-    movie.video_urls = video_urls
-    movie.category_id = movie_data.category_id
-    movie.is_free = movie_data.is_free
-    movie.movie_type = movie_data.movie_type or "single"
-    movie.country = movie_data.country or "vn"
-    movie.section_type = movie_data.section_type or "feature"
-
-    db.commit()
-    db.refresh(movie)
-
-    return format_movie_response(movie, db)
-
-
 @router.delete("/{movie_id}")
 def delete_movie(
     movie_id: int,
@@ -369,9 +326,10 @@ def delete_movie(
 
 
 # ==========================================
-# 3. BÌNH LUẬN & ĐÁNH GIÁ (COMMENTS & RATINGS)
+# 4. BÌNH LUẬN & ĐÁNH GIÁ (COMMENTS & RATINGS)
 # ==========================================
 
+@router.get("/{movie_id}/comments", response_model=MovieCommentsSummary)
 @router.get("/{movie_id}/comments/", response_model=MovieCommentsSummary)
 def get_movie_comments(
     movie_id: int,
@@ -392,6 +350,7 @@ def get_movie_comments(
     }
 
 
+@router.post("/{movie_id}/comments", response_model=CommentResponse)
 @router.post("/{movie_id}/comments/", response_model=CommentResponse)
 def create_movie_comment(
     movie_id: int,
@@ -419,6 +378,7 @@ def create_movie_comment(
     return new_comment
 
 
+@router.put("/{movie_id}/comments/{comment_id}", response_model=CommentResponse)
 @router.put("/{movie_id}/comments/{comment_id}/", response_model=CommentResponse)
 def update_movie_comment(
     movie_id: int,
@@ -439,6 +399,7 @@ def update_movie_comment(
     return comment
 
 
+@router.delete("/{movie_id}/comments/{comment_id}")
 @router.delete("/{movie_id}/comments/{comment_id}/")
 def delete_movie_comment(
     movie_id: int,
