@@ -4,6 +4,11 @@ sqlalchemy>=2.0.0
 alembic>=1.11.0
 psycopg2-binary>=2.9.0
 pydantic>=2.0.0
-python-dotenv>=1.0.0
-imageio-ffmpeg
+pydantic-settings
 email-validator
+python-dotenv>=1.0.0
+passlib[bcrypt]
+bcrypt
+python-jose[cryptography]
+python-multipart
+imageio-ffmpeg
