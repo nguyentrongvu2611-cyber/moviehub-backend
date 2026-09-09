@@ -12,12 +12,10 @@ app = FastAPI(
 )
 
 # 1. LẤY ĐƯỜNG DẪN THỰC TẾ TRỎ RA GỐC DỰ ÁN (PROJECT ROOT)
-# Nếu main.py nằm trong folder app/ -> lùi ra 1 cấp (..)
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..")) # Lùi ra thư mục gốc
 UPLOAD_DIR = os.path.join(PROJECT_ROOT, "uploads")
 
-# Kiểm tra đường dẫn trên terminal khi khởi động server
 print(f"--> [DEBUG] Đường dẫn uploads thực tế: {UPLOAD_DIR}")
 
 os.makedirs(os.path.join(UPLOAD_DIR, "posters"), exist_ok=True)
@@ -25,9 +23,12 @@ os.makedirs(os.path.join(UPLOAD_DIR, "videos"), exist_ok=True)
 
 Base.metadata.create_all(bind=engine)
 
+# Thêm domain GitHub Pages vào danh sách origins
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "https://nguyentrongvu2611-cyber.github.io",
+    "https://nguyentrongvu2611-cyber.github.io/MovieHub",
 ]
 
 app.add_middleware(
