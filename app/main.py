@@ -9,7 +9,7 @@ from app.api.v1.api import api_router
 app = FastAPI(
     title="MovieHub API",
     version="1.0.0",
-    redirect_slashes=True  # Đổi thành True để FastAPI tự xử lý chuẩn hóa đường dẫn
+    redirect_slashes=True
 )
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,19 +21,20 @@ os.makedirs(os.path.join(UPLOAD_DIR, "videos"), exist_ok=True)
 
 Base.metadata.create_all(bind=engine)
 
-# Danh sách Origins cho phép truy cập
+# Danh sách Origins cho phép (bổ sung cả domain gốc và có / phía sau)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://nguyentrongvu2611-cyber.github.io",
+    "https://nguyentrongvu2611-cyber.github.io/",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True, 
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Mở rộng cho tất cả các HTTP Methods
+    allow_headers=["*"],  # Mở rộng cho tất cả Headers
     expose_headers=["*"],
 )
 
