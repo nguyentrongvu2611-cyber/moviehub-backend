@@ -14,3 +14,4 @@ python-multipart
 imageio-ffmpeg
 fastapi-mail
 aiofiles
+ffmpeg-python
