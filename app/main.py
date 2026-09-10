@@ -21,20 +21,20 @@ os.makedirs(os.path.join(UPLOAD_DIR, "videos"), exist_ok=True)
 
 Base.metadata.create_all(bind=engine)
 
-# Danh sách Origins cho phép (bổ sung cả domain gốc và có / phía sau)
+# Danh sách Origins cho phép (lưu ý: KHÔNG để dấu / ở cuối domain)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:3000",
     "https://nguyentrongvu2611-cyber.github.io",
-    "https://nguyentrongvu2611-cyber.github.io/",
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True, 
-    allow_methods=["*"],  # Mở rộng cho tất cả các HTTP Methods
-    allow_headers=["*"],  # Mở rộng cho tất cả Headers
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["*"],
 )
 

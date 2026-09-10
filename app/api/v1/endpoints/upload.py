@@ -205,7 +205,7 @@ async def upload_avatar(
         while content := await file.read(1024 * 1024):
             await buffer.write(content)
 
-    avatar_url = f"http://127.0.0.1:8000/uploads/avatars/{filename}"
+    avatar_url = f"https://moviehub-backend-ln1c.onrender.com/uploads/avatars/{filename}"
     user.avatar = avatar_url
 
     db.commit()
