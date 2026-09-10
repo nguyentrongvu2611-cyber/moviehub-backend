@@ -1,15 +1,19 @@
 import random
 import os
 from datetime import datetime, timedelta, timezone
+import json
+import asyncio
+import bcrypt
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from passlib.context import CryptContext
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
 from dotenv import load_dotenv
-import json
-import asyncio
 from pydantic import BaseModel
+
 from app.core.database import get_db
 from app.core.sse import sse_manager
 from app.core.security import get_current_user, create_access_token
@@ -34,7 +38,11 @@ pwd_context = CryptContext(
     deprecated="auto"
 )
 
-# Cấu hình FastMail kết nối Google SMTP
+def hash_password(password: str) -> str:
+    pwd_bytes = password.encode('utf-8')
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(pwd_bytes, salt).decode('utf-8')
+
 conf = ConnectionConfig(
     MAIL_USERNAME=os.getenv("MAIL_USERNAME"),
     MAIL_PASSWORD=os.getenv("MAIL_PASSWORD"),
@@ -46,7 +54,6 @@ conf = ConnectionConfig(
     USE_CREDENTIALS=True
 )
 
-# Bộ nhớ tạm lưu OTP
 otp_store = {}
 
 
@@ -59,25 +66,46 @@ def login(
     response: Response,
     db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(User.username == user_data.username).first()
+    user = db.query(User).filter(
+        or_(
+            User.username == user_data.username,
+            User.email == user_data.username
+        )
+    ).first()
 
     if not user:
-        raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
-
-    try:
-        is_valid_password = pwd_context.verify(user_data.password, user.password)
-    except Exception as e:
-        print(f"Lỗi kiểm tra bcrypt: {e}")
         raise HTTPException(
-            status_code=500, 
-            detail="Lỗi hệ thống khi kiểm tra mật khẩu."
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Tên đăng nhập hoặc mật khẩu không đúng"
         )
 
+    is_valid_password = False
+    try:
+        is_valid_password = bcrypt.checkpw(
+            user_data.password.encode('utf-8'), 
+            user.password.encode('utf-8')
+        )
+    except Exception:
+        try:
+            is_valid_password = pwd_context.verify(user_data.password, user.password)
+        except Exception as e:
+            print(f"Lỗi kiểm tra hash mật khẩu: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Lỗi hệ thống khi kiểm tra mật khẩu."
+            )
+
     if not is_valid_password:
-        raise HTTPException(status_code=401, detail="Tên đăng nhập hoặc mật khẩu không đúng")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Tên đăng nhập hoặc mật khẩu không đúng"
+        )
 
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="Tài khoản đã bị khóa")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tài khoản đã bị khóa"
+        )
 
     access_token = create_access_token(subject=user.id)
 
@@ -85,12 +113,15 @@ def login(
         key="access_token",
         value=access_token,
         httponly=True,
-        samesite="lax",
-        secure=False  # Đổi thành True khi lên Production (HTTPS)
+        samesite="none",
+        secure=True,
+        max_age=86400 * 7
     )
 
     return {
         "message": "Đăng nhập thành công",
+        "access_token": access_token,
+        "token_type": "bearer",
         "user": {
             "id": user.id,
             "username": user.username,
@@ -106,10 +137,18 @@ def login(
 
 @router.post("/logout")
 def logout(response: Response):
-    response.delete_cookie(key="access_token")
+    response.delete_cookie(
+        key="access_token",
+        httponly=True,
+        samesite="none",
+        secure=True
+    )
     return {"message": "Đăng xuất thành công"}
 
+
+# ==========================================
 # 2. BẢO MẬT: THAY ĐỔI EMAIL VỚI TOKEN & OTP
+# ==========================================
 @router.post("/send-otp")
 async def send_otp_for_email_change(
     data: SendOTPRequest,
@@ -117,21 +156,24 @@ async def send_otp_for_email_change(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if not pwd_context.verify(data.current_password, current_user.password):
+    if not bcrypt.checkpw(data.current_password.encode('utf-8'), current_user.password.encode('utf-8')):
         raise HTTPException(status_code=400, detail="Mật khẩu hiện tại không chính xác")
+        
     new_email = data.new_email.strip()
     if current_user.email == new_email:
         raise HTTPException(status_code=400, detail="Email mới phải khác với email hiện tại")
+        
     existing_user = db.query(User).filter(User.email == new_email).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="Email này đã được sử dụng bởi tài khoản khác")
+        
     otp = str(random.randint(100000, 999999))
-    # Cập nhật dùng UTC timezone chuẩn
     otp_store[new_email] = {
         "code": otp,
         "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
         "user_id": current_user.id
     }
+    
     html_content = f"""
     <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #141414; color: #ffffff;">
         <h2 style="color: #e50914;">MOVIEHUB</h2>
@@ -139,12 +181,14 @@ async def send_otp_for_email_change(
         <h1 style="color: #e50914; letter-spacing: 5px; background: #222; padding: 10px; display: inline-block;">{otp}</h1>
         <p>Mã có hiệu lực trong <b>5 phút</b>. Vui lòng không chia sẻ mã này cho bất kỳ ai.</p>
     </div>"""
+    
     message = MessageSchema(
         subject="[MovieHub] Mã OTP Thay đổi địa chỉ Email",
         recipients=[new_email],
         body=html_content,
         subtype=MessageType.html
     )
+    
     fm = FastMail(conf)
     background_tasks.add_task(fm.send_message, message)
     return {"message": f"Mã OTP đã được gửi đến email {new_email}"}
@@ -192,20 +236,26 @@ def change_password(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    if not pwd_context.verify(data.old_password, current_user.password):
+    is_valid = False
+    try:
+        is_valid = bcrypt.checkpw(data.old_password.encode('utf-8'), current_user.password.encode('utf-8'))
+    except Exception:
+        is_valid = pwd_context.verify(data.old_password, current_user.password)
+
+    if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Mật khẩu hiện tại không chính xác"
         )
         
-    current_user.password = pwd_context.hash(data.new_password)
+    current_user.password = hash_password(data.new_password)
     db.commit()
     
     return {"message": "Đổi mật khẩu thành công"}
 
 
 # ==========================================
-# 4. CÁC API KHÁC (ĐĂNG KÝ, QUÊN MẬT KHẨU, SSE)
+# 4. ĐĂNG KÝ, QUÊN MẬT KHẨU, SSE STREAM, USER STATUS
 # ==========================================
 @router.post("/register", response_model=UserResponse)
 def register(
@@ -224,12 +274,10 @@ def register(
             detail="Tên đăng nhập hoặc email đã tồn tại"
         )
 
-    hashed_password = pwd_context.hash(user.password)
-
     new_user = User(
         username=user.username,
         email=user.email,
-        password=hashed_password,
+        password=hash_password(user.password),
         role="user",
         is_active=True,
         is_premium=False
@@ -303,7 +351,7 @@ def reset_password(
     if not user:
         raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản")
 
-    user.password = pwd_context.hash(data.password)
+    user.password = hash_password(data.password)
     db.commit()
 
     del otp_store[data.email]
@@ -340,9 +388,8 @@ async def update_user_status(
     user_id: int, 
     is_premium: bool, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user) # Bổ sung kiểm tra Authentication
+    current_user: User = Depends(get_current_user)
 ):
-    # Kiểm tra phân quyền Admin
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Bạn không có quyền thực hiện thao tác này")
 
@@ -368,6 +415,7 @@ async def update_user_status(
     )
 
     return {"message": "Cập nhật thành công"}
+
 
 class UpdateNameRequest(BaseModel):
     full_name: str
