@@ -93,3 +93,11 @@ async def upload_avatar(
         "avatar": avatar_url,
         "user_id": user_id
     }
+    
+@router.get("/stream-progress")
+async def get_stream_progress():
+    return {
+        "status": "success",
+        "progress": 100,
+        "message": "Sẵn sàng xử lý file"
+    }
