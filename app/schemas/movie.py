@@ -1,6 +1,8 @@
-from typing import Optional, Dict
-from pydantic import BaseModel, Field
+import json
+from typing import Optional, Dict, Union
+from pydantic import BaseModel, Field, field_validator
 from app.schemas.category import CategoryResponse
+
 
 class MovieBase(BaseModel):
     title: str = Field(..., min_length=1, max_length=255, description="Tên phim")
@@ -12,19 +14,32 @@ class MovieBase(BaseModel):
     poster_url: Optional[str] = None
     video_url: Optional[str] = None
     
-    # THÊM ĐỊNH NGHĨA CHẤT LƯỢNG VIDEO
-    video_urls: Optional[Dict[str, str]] = None
+    # Hỗ trợ nhận cả Dict lẫn chuỗi JSON
+    video_urls: Optional[Union[Dict[str, str], str]] = None
 
     category_id: int = Field(..., description="ID danh mục phim")
     is_free: bool = True
 
-    # Các trường mở rộng
     movie_type: Optional[str] = Field(default="single", description="Loại phim: single/series")
     country: Optional[str] = Field(default="vn", description="Quốc gia phát hành")
     section_type: Optional[str] = Field(default="feature", description="Vị trí hiển thị trên giao diện")
 
+    @field_validator("video_urls", mode="before")
+    @classmethod
+    def parse_video_urls(cls, v):
+        if isinstance(v, str):
+            if not v.strip():
+                return {}
+            try:
+                return json.loads(v)
+            except Exception:
+                return {}
+        return v or {}
+
+
 class MovieCreate(MovieBase):
     pass
+
 
 class MovieUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -35,15 +50,26 @@ class MovieUpdate(BaseModel):
     director: Optional[str] = Field(None, max_length=255)
     poster_url: Optional[str] = None
     video_url: Optional[str] = None
-    
-    # CHO PHÉP CẬP NHẬT VIDEO_URLS
-    video_urls: Optional[Dict[str, str]] = None
+    video_urls: Optional[Union[Dict[str, str], str]] = None
 
     category_id: Optional[int] = None
     is_free: Optional[bool] = None
     movie_type: Optional[str] = None
     country: Optional[str] = None
     section_type: Optional[str] = None
+
+    @field_validator("video_urls", mode="before")
+    @classmethod
+    def parse_video_urls(cls, v):
+        if isinstance(v, str):
+            if not v.strip():
+                return {}
+            try:
+                return json.loads(v)
+            except Exception:
+                return {}
+        return v
+
 
 class MovieResponse(MovieBase):
     id: int

@@ -1,12 +1,9 @@
 import os
 import uuid
 import json
-import asyncio
 import aiofiles
-import ffmpeg
-import shutil
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, BackgroundTasks, status
+from typing import Optional, List, Dict, Union
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, status
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
 from pydantic import BaseModel
@@ -50,33 +47,19 @@ def get_full_media_url(path: Optional[str]) -> Optional[str]:
     return path
 
 
-def transcode_video_sync(input_path: str, output_folder: str):
-    """Nén video sang 720p và 480p bằng FFmpeg ở background."""
-    resolutions = {
-        "720p": ("1280x720", "1M"),
-        "480p": ("854x480", "500k")
-    }
-    
-    ffmpeg_exe = shutil.which("ffmpeg") or "ffmpeg"
-
-    for quality, (scale, bitrate) in resolutions.items():
-        output_path = os.path.join(output_folder, f"{quality}.mp4")
+def prepare_video_urls(video_urls_input: Optional[Union[Dict[str, str], str]]) -> Dict[str, str]:
+    """Chuyển đổi dữ liệu video_urls từ string/dict thành dict chuẩn."""
+    if not video_urls_input:
+        return {}
+    if isinstance(video_urls_input, str):
         try:
-            (
-                ffmpeg
-                .input(input_path)
-                .output(output_path, vf=f"scale={scale}", video_bitrate=bitrate, acodec="aac")
-                .overwrite_output()
-                .run(cmd=ffmpeg_exe, capture_stdout=True, capture_stderr=True)
-            )
-        except ffmpeg.Error as e:
-            print(f"Lỗi FFmpeg khi render {quality}: {e.stderr.decode('utf-8') if e.stderr else str(e)}")
-        except Exception as e:
-            print(f"Lỗi hệ thống khi render {quality}: {str(e)}")
-
-
-async def run_transcode(input_path: str, output_folder: str):
-    await asyncio.to_thread(transcode_video_sync, input_path, output_folder)
+            parsed = json.loads(video_urls_input)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    if isinstance(video_urls_input, dict):
+        return video_urls_input
+    return {}
 
 
 def format_movie_response(movie: Movie, db: Session) -> dict:
@@ -85,22 +68,25 @@ def format_movie_response(movie: Movie, db: Session) -> dict:
         MovieView.movie_id == movie.id
     ).scalar() or 0
 
-    # Xử lý video_urls (Đảm bảo đọc đúng dạng dict/json)
-    raw_video_urls = getattr(movie, "video_urls", None)
-    if isinstance(raw_video_urls, str):
-        try:
-            raw_video_urls = json.loads(raw_video_urls)
-        except Exception:
-            raw_video_urls = {}
+    # Xử lý chuẩn hóa video_urls từ model
+    raw_video_urls = prepare_video_urls(getattr(movie, "video_urls", None))
 
     if not raw_video_urls and movie.video_url:
         raw_video_urls = {"1080p": movie.video_url}
 
     # Nối Domain HTTPS cho từng chất lượng phim
     formatted_video_urls = {}
-    if isinstance(raw_video_urls, dict):
-        for quality, url in raw_video_urls.items():
-            formatted_video_urls[quality] = get_full_media_url(url)
+    for quality, url in raw_video_urls.items():
+        if url:
+            formatted_video_urls[quality] = get_full_media_url(str(url))
+
+    # Tự động gán video_url mặc định nếu thiếu
+    default_video_url = (
+        formatted_video_urls.get("1080p") or
+        formatted_video_urls.get("720p") or
+        formatted_video_urls.get("480p") or
+        get_full_media_url(movie.video_url)
+    )
 
     return {
         "id": movie.id,
@@ -112,7 +98,7 @@ def format_movie_response(movie: Movie, db: Session) -> dict:
         "director": getattr(movie, "director", "Chưa cập nhật"),
         "views": views_count,
         "poster_url": get_full_media_url(movie.poster_url),
-        "video_url": get_full_media_url(movie.video_url),
+        "video_url": default_video_url,
         "video_urls": formatted_video_urls,
         "category_id": movie.category_id,
         "is_free": movie.is_free,
@@ -123,45 +109,59 @@ def format_movie_response(movie: Movie, db: Session) -> dict:
 
 
 # ==========================================
-# 1. UPLOAD MEDIA
+# 1. UPLOAD MEDIA (ĐÃ TỐI ƯU MULTI-QUALITY)
 # ==========================================
 
 @router.post("/upload-video")
 async def upload_video(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    file_480p: Optional[UploadFile] = File(None),
+    file_720p: Optional[UploadFile] = File(None),
+    file_1080p: Optional[UploadFile] = File(None),
     current_user: User = Depends(get_current_user)
 ):
-    if not file.filename.endswith(('.mp4', '.mkv', '.avi', '.mov')):
-        raise HTTPException(status_code=400, detail="Định dạng video không hỗ trợ. Hãy chọn file .mp4, .mkv, .avi")
+    """
+    Nhận trực tiếp tối đa 3 chất lượng file video đã được convert sẵn từ client.
+    Không tốn tài nguyên transcode server.
+    """
+    files = {
+        "480p": file_480p,
+        "720p": file_720p,
+        "1080p": file_1080p
+    }
+
+    if not any(files.values()):
+        raise HTTPException(status_code=400, detail="Vui lòng cung cấp ít nhất 1 file video (480p, 720p hoặc 1080p).")
 
     video_id = str(uuid.uuid4())
     movie_folder = os.path.join(UPLOAD_DIR, "videos", video_id)
     os.makedirs(movie_folder, exist_ok=True)
 
-    original_path = os.path.join(movie_folder, "1080p.mp4")
-    try:
-        async with aiofiles.open(original_path, 'wb') as out_file:
-            while content := await file.read(1024 * 1024):
-                await out_file.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi lưu video gốc: {str(e)}")
+    video_urls = {}
 
-    background_tasks.add_task(run_transcode, original_path, movie_folder)
+    for quality, file_obj in files.items():
+        if file_obj:
+            ext = os.path.splitext(file_obj.filename)[1].lower() or ".mp4"
+            if ext not in ['.mp4', '.mkv', '.avi', '.mov']:
+                raise HTTPException(status_code=400, detail=f"Định dạng {ext} của file {quality} không được hỗ trợ.")
 
-    p_1080 = f"/uploads/videos/{video_id}/1080p.mp4"
-    p_720 = f"/uploads/videos/{video_id}/720p.mp4"
-    p_480 = f"/uploads/videos/{video_id}/480p.mp4"
+            file_path = os.path.join(movie_folder, f"{quality}{ext}")
+            try:
+                async with aiofiles.open(file_path, 'wb') as out_file:
+                    while chunk := await file_obj.read(1024 * 1024):
+                        await out_file.write(chunk)
+                
+                rel_path = f"/uploads/videos/{video_id}/{quality}{ext}"
+                video_urls[quality] = get_full_media_url(rel_path)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Lỗi khi lưu file {quality}: {str(e)}")
+
+    default_url = video_urls.get("1080p") or video_urls.get("720p") or video_urls.get("480p")
 
     return {
-        "message": "Upload video gốc thành công. Đang xử lý nén các bản 720p và 480p ở background...",
+        "message": "Upload các bản chất lượng phim thành công!",
         "video_id": video_id,
-        "video_url": get_full_media_url(p_1080),
-        "video_urls": {
-            "1080p": get_full_media_url(p_1080),
-            "720p": get_full_media_url(p_720),
-            "480p": get_full_media_url(p_480)
-        }
+        "video_url": default_url,
+        "video_urls": video_urls
     }
 
 
@@ -182,8 +182,8 @@ async def upload_poster(
 
     try:
         async with aiofiles.open(file_path, 'wb') as out_file:
-            while content := await file.read(1024 * 1024):
-                await out_file.write(content)
+            while chunk := await file.read(1024 * 1024):
+                await out_file.write(chunk)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi khi lưu poster: {str(e)}")
 
@@ -198,7 +198,7 @@ async def upload_poster(
 # 2. QUẢN LÝ PHIM (ROUTES TĨNH & TÌM KIẾM)
 # ==========================================
 
-@router.get("/search", response_model=list[MovieResponse])
+@router.get("/search", response_model=List[MovieResponse])
 def search_movies(
     q: str = Query(..., min_length=1),
     db: Session = Depends(get_db)
@@ -213,8 +213,8 @@ def search_movies(
     return [format_movie_response(m, db) for m in movies]
 
 
-@router.get("", response_model=list[MovieResponse])
-@router.get("/", response_model=list[MovieResponse])
+@router.get("", response_model=List[MovieResponse])
+@router.get("/", response_model=List[MovieResponse])
 def get_movies(
     section_type: Optional[str] = Query(None, description="Lọc theo section_type"),
     category_id: Optional[int] = Query(None, description="Lọc theo ID thể loại"),
@@ -263,9 +263,12 @@ def create_movie(
     if not category:
         raise HTTPException(status_code=404, detail="Không tìm thấy thể loại")
 
-    video_urls = movie.video_urls
+    # Chuẩn hóa video_urls
+    video_urls = prepare_video_urls(movie.video_urls)
     if not video_urls and movie.video_url:
         video_urls = {"1080p": movie.video_url}
+
+    default_video_url = movie.video_url or video_urls.get("1080p") or video_urls.get("720p") or video_urls.get("480p")
 
     new_movie = Movie(
         title=movie.title,
@@ -275,7 +278,7 @@ def create_movie(
         quality=movie.quality,
         director=movie.director,
         poster_url=movie.poster_url,
-        video_url=movie.video_url,
+        video_url=default_video_url,
         video_urls=video_urls,
         category_id=movie.category_id,
         is_free=movie.is_free,
@@ -315,18 +318,20 @@ def update_movie(
     if not movie:
         raise HTTPException(status_code=404, detail="Không tìm thấy phim")
 
-    update_data = movie_data.model_dump(exclude_unset=True)
+    update_dict = movie_data.model_dump(exclude_unset=True)
 
-    if "category_id" in update_data and update_data["category_id"] is not None:
-        category = db.query(Category).filter(Category.id == update_data["category_id"]).first()
+    if "category_id" in update_dict and update_dict["category_id"] is not None:
+        category = db.query(Category).filter(Category.id == update_dict["category_id"]).first()
         if not category:
             raise HTTPException(status_code=404, detail="Không tìm thấy thể loại")
 
-    if "video_url" in update_data and "video_urls" not in update_data:
-        if update_data["video_url"]:
-            update_data["video_urls"] = {"1080p": update_data["video_url"]}
+    if "video_urls" in update_dict:
+        update_dict["video_urls"] = prepare_video_urls(update_dict["video_urls"])
 
-    for field, value in update_data.items():
+    if update_dict.get("video_url") and not update_dict.get("video_urls"):
+        update_dict["video_urls"] = {"1080p": update_dict["video_url"]}
+
+    for field, value in update_dict.items():
         setattr(movie, field, value)
 
     db.commit()

@@ -13,7 +13,7 @@ class Movie(Base):
     poster_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     video_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     
-    # THÊM CỘT LƯU DANH SÁCH CHẤT LƯỢNG VIDEO (JSON)
+    # Cột lưu dictionary dạng JSON {"480p": "...", "720p": "...", "1080p": "..."}
     video_urls: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), nullable=False)
@@ -22,7 +22,6 @@ class Movie(Base):
     is_free: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     director: Mapped[str | None] = mapped_column(String(255), nullable=True, default="Chưa cập nhật")
     
-    # Cột đếm lượt xem trong CSDL
     views: Mapped[int | None] = mapped_column(Integer, default=0, nullable=True)
     
     section_type: Mapped[str | None] = mapped_column(String(50), nullable=True, default="feature")

@@ -1,26 +1,14 @@
 import os
 import uuid
-import asyncio
 import aiofiles
-import json
-import subprocess
-import shutil
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models.user import User
 
 router = APIRouter()
-
-# Tự động nhận diện FFmpeg linh hoạt (Tương thích cả Windows Local & Render Linux)
-FFMPEG_EXE = (
-    shutil.which("ffmpeg") 
-    or r"C:\Users\nguye\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
-    or "ffmpeg"
-)
 
 UPLOAD_FOLDER = "uploads"
 POSTER_FOLDER = os.path.join(UPLOAD_FOLDER, "posters")
@@ -31,114 +19,9 @@ os.makedirs(POSTER_FOLDER, exist_ok=True)
 os.makedirs(VIDEO_FOLDER, exist_ok=True)
 os.makedirs(AVATAR_FOLDER, exist_ok=True)
 
-# Async Queue quản lý tin nhắn tiến trình gửi ra Frontend qua SSE
-progress_queue = asyncio.Queue()
-
-
-async def send_log(message: str):
-    """Hàm hỗ trợ đẩy log tiến trình vào Queue và in ra console"""
-    print(f"[SSE LOG]: {message}")
-    await progress_queue.put(message)
-    await asyncio.sleep(0.01)  # Nhường luồng để event loop kịp xử lý
-
-
-def run_ffmpeg_sync(cmd: list):
-    """Hàm chạy subprocess đồng bộ an toàn tuyệt đối trên Windows/Linux ThreadPool"""
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="ignore"
-    )
-    return result.returncode, result.stderr
-
-
-# --- HÀM CONVERT VIDEO ĐÃ TỐI ƯU CHO RENDER FREE TIER ---
-async def transcode_all_resolutions_async(raw_file_path: str, video_dir_path: str):
-    """Nén video sang 480p, 720p, 1080p với cấu hình nhẹ nhất tránh ngốn RAM"""
-    
-    actual_ffmpeg = shutil.which(FFMPEG_EXE) or FFMPEG_EXE
-    if not shutil.which("ffmpeg") and not os.path.exists(actual_ffmpeg):
-        await send_log(f"❌ Không tìm thấy công cụ FFmpeg trong hệ thống!")
-        return
-
-    resolutions = {
-        480: os.path.join(video_dir_path, "480p.mp4"),
-        720: os.path.join(video_dir_path, "720p.mp4"),
-        1080: os.path.join(video_dir_path, "1080p.mp4"),
-    }
-
-    await send_log("🚀 [Upload Route] Bắt đầu quá trình Convert Video...")
-
-    for height, output_path in resolutions.items():
-        await send_log(f"--> [Upload Route] Đang convert {height}p...")
-
-        # Đã tối ưu các tham số nén nhẹ để tránh OOM trên Render
-        cmd = [
-            actual_ffmpeg,
-            "-y",
-            "-i", raw_file_path,
-            "-vf", f"scale=-2:{height}",
-            "-c:v", "libx264",
-            "-crf", "28",           # Tăng CRF từ 23 -> 28 để giảm tải xử lý
-            "-preset", "ultrafast", # Chuyển sang ultrafast để nén cực nhanh
-            "-threads", "1",        # Giới hạn 1 thread tránh tràn RAM Render Free
-            output_path
-        ]
-
-        try:
-            returncode, stderr_output = await asyncio.to_thread(run_ffmpeg_sync, cmd)
-
-            if returncode == 0:
-                await send_log(f"--> [Upload Route] Hoàn tất {height}p!")
-            else:
-                err_msg = stderr_output[-300:] if stderr_output else "Lỗi FFmpeg không xác định"
-                await send_log(f"❌ Lỗi FFmpeg khi convert {height}p: {err_msg}")
-
-        except FileNotFoundError:
-            await send_log(f"❌ Không tìm thấy file FFmpeg tại đường dẫn: {actual_ffmpeg}")
-            break
-        except Exception as e:
-            error_detail = str(e) or type(e).__name__
-            await send_log(f"❌ Lỗi hệ thống khi convert {height}p: {error_detail}")
-
-    # Xóa file raw tạm thời sau khi render hoàn tất
-    if os.path.exists(raw_file_path):
-        try:
-            os.remove(raw_file_path)
-            await send_log("🎉 [Upload Route] Hoàn tất xử lý tất cả độ phân giải!")
-        except Exception as e:
-            await send_log(f"Lỗi khi xóa file raw: {str(e)}")
-
-
-# --- ENDPOINTS ---
-
-@router.get("/stream-progress")
-async def stream_progress():
-    """Endpoint Stream SSE gửi tiến trình realtime về Frontend dưới dạng JSON chuẩn"""
-    async def event_generator():
-        while True:
-            message = await progress_queue.get()
-            payload = json.dumps({"message": message})
-            yield f"data: {payload}\n\n"
-
-    return StreamingResponse(
-        event_generator(), 
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
-
 
 @router.post("/poster")
-async def upload_poster(
-    file: UploadFile = File(...)
-):
+async def upload_poster(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File phải là hình ảnh")
 
@@ -154,43 +37,27 @@ async def upload_poster(
 
 
 @router.post("/video")
-async def upload_video(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
+async def upload_video(file: UploadFile = File(...)):
     if not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="File phải là video")
 
-    await send_log("🚀 [Upload Route] Bắt đầu tải video lên server...")
-
-    file_id = str(uuid.uuid4())
-
-    video_dir_path = os.path.join(VIDEO_FOLDER, file_id)
-    os.makedirs(video_dir_path, exist_ok=True)
-
-    raw_file_path = os.path.join(video_dir_path, "raw.mp4")
+    extension = os.path.splitext(file.filename)[1] or ".mp4"
+    filename = f"{uuid.uuid4()}{extension}"
+    file_path = os.path.join(VIDEO_FOLDER, filename)
 
     try:
-        async with aiofiles.open(raw_file_path, "wb") as buffer:
+        async with aiofiles.open(file_path, "wb") as buffer:
             while content := await file.read(1024 * 1024):
                 await buffer.write(content)
-        
-        await send_log("✅ [Upload Route] Tải file gốc thành công. Đang tiến hành Convert HLS...")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lỗi khi lưu video tạm: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Lỗi khi lưu video: {str(e)}")
 
-    background_tasks.add_task(transcode_all_resolutions_async, raw_file_path, video_dir_path)
-
-    default_url = f"/uploads/videos/{file_id}/1080p.mp4"
+    video_url = f"/uploads/videos/{filename}"
 
     return {
-        "url": default_url,
-        "video_url": default_url,
-        "video_urls": {
-            "480p": f"/uploads/videos/{file_id}/480p.mp4",
-            "720p": f"/uploads/videos/{file_id}/720p.mp4",
-            "1080p": default_url
-        }
+        "url": video_url,
+        "video_url": video_url,
+        "file_path": video_url
     }
 
 
