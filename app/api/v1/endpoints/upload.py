@@ -55,11 +55,10 @@ def run_ffmpeg_sync(cmd: list):
     return result.returncode, result.stderr
 
 
-# --- HÀM CONVERT VIDEO AN TOÀN TRÊN CẢ WINDOWS VÀ LINUX ---
+# --- HÀM CONVERT VIDEO ĐÃ TỐI ƯU CHO RENDER FREE TIER ---
 async def transcode_all_resolutions_async(raw_file_path: str, video_dir_path: str):
-    """Nén video sang 480p, 720p, 1080p bằng ThreadPool subprocess"""
+    """Nén video sang 480p, 720p, 1080p với cấu hình nhẹ nhất tránh ngốn RAM"""
     
-    # Kiểm tra lại thực sự có file ffmpeg khả dụng hay không
     actual_ffmpeg = shutil.which(FFMPEG_EXE) or FFMPEG_EXE
     if not shutil.which("ffmpeg") and not os.path.exists(actual_ffmpeg):
         await send_log(f"❌ Không tìm thấy công cụ FFmpeg trong hệ thống!")
@@ -76,14 +75,16 @@ async def transcode_all_resolutions_async(raw_file_path: str, video_dir_path: st
     for height, output_path in resolutions.items():
         await send_log(f"--> [Upload Route] Đang convert {height}p...")
 
+        # Đã tối ưu các tham số nén nhẹ để tránh OOM trên Render
         cmd = [
             actual_ffmpeg,
             "-y",
             "-i", raw_file_path,
             "-vf", f"scale=-2:{height}",
             "-c:v", "libx264",
-            "-crf", "23",
-            "-preset", "fast",
+            "-crf", "28",           # Tăng CRF từ 23 -> 28 để giảm tải xử lý
+            "-preset", "ultrafast", # Chuyển sang ultrafast để nén cực nhanh
+            "-threads", "1",        # Giới hạn 1 thread tránh tràn RAM Render Free
             output_path
         ]
 
