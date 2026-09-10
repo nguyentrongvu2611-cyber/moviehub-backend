@@ -4,6 +4,7 @@ import asyncio
 import aiofiles
 import json
 import subprocess
+import shutil
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import StreamingResponse
@@ -14,8 +15,12 @@ from app.models.user import User
 
 router = APIRouter()
 
-# Đường dẫn ffmpeg tuyệt đối
-FFMPEG_EXE = r"C:\Users\nguye\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+# Tự động nhận diện FFmpeg linh hoạt (Tương thích cả Windows Local & Render Linux)
+FFMPEG_EXE = (
+    shutil.which("ffmpeg") 
+    or r"C:\Users\nguye\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+    or "ffmpeg"
+)
 
 UPLOAD_FOLDER = "uploads"
 POSTER_FOLDER = os.path.join(UPLOAD_FOLDER, "posters")
@@ -38,7 +43,7 @@ async def send_log(message: str):
 
 
 def run_ffmpeg_sync(cmd: list):
-    """Hàm chạy subprocess đồng bộ an toàn tuyệt đối trên Windows ThreadPool"""
+    """Hàm chạy subprocess đồng bộ an toàn tuyệt đối trên Windows/Linux ThreadPool"""
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -50,9 +55,16 @@ def run_ffmpeg_sync(cmd: list):
     return result.returncode, result.stderr
 
 
-# --- HÀM CONVERT VIDEO AN TOÀN TRÊN WINDOWS ---
+# --- HÀM CONVERT VIDEO AN TOÀN TRÊN CẢ WINDOWS VÀ LINUX ---
 async def transcode_all_resolutions_async(raw_file_path: str, video_dir_path: str):
     """Nén video sang 480p, 720p, 1080p bằng ThreadPool subprocess"""
+    
+    # Kiểm tra lại thực sự có file ffmpeg khả dụng hay không
+    actual_ffmpeg = shutil.which(FFMPEG_EXE) or FFMPEG_EXE
+    if not shutil.which("ffmpeg") and not os.path.exists(actual_ffmpeg):
+        await send_log(f"❌ Không tìm thấy công cụ FFmpeg trong hệ thống!")
+        return
+
     resolutions = {
         480: os.path.join(video_dir_path, "480p.mp4"),
         720: os.path.join(video_dir_path, "720p.mp4"),
@@ -65,7 +77,7 @@ async def transcode_all_resolutions_async(raw_file_path: str, video_dir_path: st
         await send_log(f"--> [Upload Route] Đang convert {height}p...")
 
         cmd = [
-            FFMPEG_EXE,
+            actual_ffmpeg,
             "-y",
             "-i", raw_file_path,
             "-vf", f"scale=-2:{height}",
@@ -79,14 +91,13 @@ async def transcode_all_resolutions_async(raw_file_path: str, video_dir_path: st
             returncode, stderr_output = await asyncio.to_thread(run_ffmpeg_sync, cmd)
 
             if returncode == 0:
-                # Bắn log hoàn tất từng độ phân giải
                 await send_log(f"--> [Upload Route] Hoàn tất {height}p!")
             else:
                 err_msg = stderr_output[-300:] if stderr_output else "Lỗi FFmpeg không xác định"
                 await send_log(f"❌ Lỗi FFmpeg khi convert {height}p: {err_msg}")
 
         except FileNotFoundError:
-            await send_log(f"❌ Không tìm thấy file FFmpeg tại đường dẫn: {FFMPEG_EXE}")
+            await send_log(f"❌ Không tìm thấy file FFmpeg tại đường dẫn: {actual_ffmpeg}")
             break
         except Exception as e:
             error_detail = str(e) or type(e).__name__
@@ -149,7 +160,6 @@ async def upload_video(
     if not file.content_type.startswith("video/"):
         raise HTTPException(status_code=400, detail="File phải là video")
 
-    # Báo log khởi tạo upload ngay lập tức ra Frontend
     await send_log("🚀 [Upload Route] Bắt đầu tải video lên server...")
 
     file_id = str(uuid.uuid4())
@@ -164,7 +174,6 @@ async def upload_video(
             while content := await file.read(1024 * 1024):
                 await buffer.write(content)
         
-        # Báo log tải file thành công
         await send_log("✅ [Upload Route] Tải file gốc thành công. Đang tiến hành Convert HLS...")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lỗi khi lưu video tạm: {str(e)}")
