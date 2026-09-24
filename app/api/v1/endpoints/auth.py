@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from passlib.context import CryptContext
-from fastapi_mail import FastMail, MessageSchema, ConnectionConfig, MessageType
+from app.core.config import send_otp_email
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
