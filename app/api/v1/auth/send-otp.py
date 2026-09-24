@@ -10,13 +10,10 @@ from app.models.user import User
 from app.core.database import get_db
 from app.core.config import send_otp_email 
 from app.core.security import get_current_user
+from app.core.store import otp_store  # Import biến dict dùng chung từ store.py
 
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# Bộ nhớ tạm lưu OTP dùng chung cho cả gửi & xác thực
-# (Lưu ý: Nếu verify-otp nằm ở file khác, hãy import otp_store từ file chung như app.core.config hoặc app.core.security)
-otp_store = {}
 
 class SendOTPRequest(BaseModel):
     user_id: int
@@ -29,7 +26,7 @@ async def send_otp_for_email_change(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    # 1. Kiểm tra mật khẩu hiện tại (Hỗ trợ linh hoạt cả Bcrypt lẫn Passlib)
+    # 1. Kiểm tra mật khẩu hiện tại
     is_password_correct = False
     try:
         is_password_correct = bcrypt.checkpw(
@@ -61,7 +58,7 @@ async def send_otp_for_email_change(
             detail="Email này đã được sử dụng bởi một tài khoản khác!"
         )
 
-    # 4. Tạo OTP 6 số ngẫu nhiên & LƯU VÀO OTP_STORE (Hạn dùng 5 phút)
+    # 4. Tạo OTP 6 số ngẫu nhiên & LƯU VÀO OTP_STORE DÙNG CHUNG (Hạn dùng 5 phút)
     otp_code = str(random.randint(100000, 999999))
     otp_store[clean_email] = {
         "code": otp_code,

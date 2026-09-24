@@ -2,10 +2,11 @@ import os
 import resend
 from pydantic import EmailStr
 from dotenv import load_dotenv
+from app.core.store import otp_store
 
 load_dotenv()
 
-# Cấu hình Resend API Key
+# Cấu hình API Key của Resend
 resend.api_key = os.getenv("RESEND_API_KEY")
 
 async def send_otp_email(email_to: EmailStr, otp_code: str):
@@ -21,22 +22,20 @@ async def send_otp_email(email_to: EmailStr, otp_code: str):
                     {otp_code}
                 </span>
             </div>
-            <p style="color: #888; font-size: 13px; text-align: center;">Mã này có hiệu lực trong 5 phút. Vui lòng không chia sẻ mã này cho ai.</p>
+            <p style="color: #888; font-size: 13px; text-align: center;">Mã này có hiệu lực trong 5 phút. Vui lòng không chia sẻ mã này cho bất kỳ ai.</p>
         </div>
     </div>
     """
 
     try:
-        # Resend gửi qua HTTPS nên Render KHÔNG THỂ CHẶN
         params = {
-            "from": "MovieHub <onboarding@resend.dev>",  # Domain mặc định của Resend
+            "from": "MovieHub <onboarding@resend.dev>",
             "to": [email_to],
             "subject": "[MovieHub] Mã xác thực OTP",
             "html": html_content,
         }
-        
         email = resend.Emails.send(params)
-        print(f"✅ [Resend] Đã gửi email OTP thành công! ID: {email}")
+        print(f"✅ [Resend] Đã gửi email OTP thành công! Response: {email}")
     except Exception as e:
         print(f"❌ [Resend] Lỗi gửi mail chi tiết: {type(e).__name__} - {str(e)}")
         raise e
