@@ -10,7 +10,6 @@ python-dotenv>=1.0.0
 python-jose[cryptography]
 python-multipart
 imageio-ffmpeg
-fastapi-mail
 aiofiles
 ffmpeg-python
 static-ffmpeg
