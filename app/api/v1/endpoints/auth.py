@@ -43,14 +43,15 @@ def hash_password(password: str) -> str:
     salt = bcrypt.gensalt()
     return bcrypt.hashpw(pwd_bytes, salt).decode('utf-8')
 
+# 🚀 CẤU HÌNH CỔNG 465 SSL/TLS CHUẨN DÙNG CHO GMAIL SMTP
 conf = ConnectionConfig(
     MAIL_USERNAME=os.getenv("MAIL_USERNAME"),
     MAIL_PASSWORD=os.getenv("MAIL_PASSWORD"),
-    MAIL_FROM=os.getenv("MAIL_FROM"),
-    MAIL_PORT=int(os.getenv("MAIL_PORT", 587)),
+    MAIL_FROM=os.getenv("MAIL_FROM", os.getenv("MAIL_USERNAME")),
+    MAIL_PORT=int(os.getenv("MAIL_PORT", 465)),
     MAIL_SERVER=os.getenv("MAIL_SERVER", "smtp.gmail.com"),
-    MAIL_STARTTLS=True,
-    MAIL_SSL_TLS=False,
+    MAIL_STARTTLS=False,
+    MAIL_SSL_TLS=True,
     USE_CREDENTIALS=True
 )
 
@@ -156,7 +157,17 @@ async def send_otp_for_email_change(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if not bcrypt.checkpw(data.current_password.encode('utf-8'), current_user.password.encode('utf-8')):
+    # Kiểm tra mật khẩu hiện tại linh hoạt cả bcrypt lẫn passlib
+    is_password_correct = False
+    try:
+        is_password_correct = bcrypt.checkpw(
+            data.current_password.encode('utf-8'), 
+            current_user.password.encode('utf-8')
+        )
+    except Exception:
+        is_password_correct = pwd_context.verify(data.current_password, current_user.password)
+
+    if not is_password_correct:
         raise HTTPException(status_code=400, detail="Mật khẩu hiện tại không chính xác")
         
     new_email = data.new_email.strip()
@@ -175,10 +186,10 @@ async def send_otp_for_email_change(
     }
     
     html_content = f"""
-    <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #141414; color: #ffffff;">
+    <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #141414; color: #ffffff; border-radius: 8px;">
         <h2 style="color: #e50914;">MOVIEHUB</h2>
         <p>Mã xác nhận (OTP) để thay đổi địa chỉ email của bạn là:</p>
-        <h1 style="color: #e50914; letter-spacing: 5px; background: #222; padding: 10px; display: inline-block;">{otp}</h1>
+        <h1 style="color: #e50914; letter-spacing: 5px; background: #222; padding: 12px; display: inline-block; border-radius: 6px;">{otp}</h1>
         <p>Mã có hiệu lực trong <b>5 phút</b>. Vui lòng không chia sẻ mã này cho bất kỳ ai.</p>
     </div>"""
     
@@ -189,8 +200,13 @@ async def send_otp_for_email_change(
         subtype=MessageType.html
     )
     
-    fm = FastMail(conf)
-    background_tasks.add_task(fm.send_message, message)
+    try:
+        fm = FastMail(conf)
+        background_tasks.add_task(fm.send_message, message)
+    except Exception as e:
+        print(f"❌ Lỗi gửi Mail SMTP: {e}")
+        raise HTTPException(status_code=500, detail="Không thể gửi mail OTP, vui lòng kiểm tra lại cấu hình SMTP.")
+
     return {"message": f"Mã OTP đã được gửi đến email {new_email}"}
 
 
