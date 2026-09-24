@@ -1,4 +1,5 @@
 import random
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -13,7 +14,8 @@ from app.core.security import get_current_user
 router = APIRouter()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Khai báo bộ nhớ tạm lưu OTP (hoặc import từ 1 file chung nếu muốn dùng chung với verify-otp)
+# Bộ nhớ tạm lưu OTP dùng chung cho cả gửi & xác thực
+# (Lưu ý: Nếu verify-otp nằm ở file khác, hãy import otp_store từ file chung như app.core.config hoặc app.core.security)
 otp_store = {}
 
 class SendOTPRequest(BaseModel):
@@ -59,17 +61,26 @@ async def send_otp_for_email_change(
             detail="Email này đã được sử dụng bởi một tài khoản khác!"
         )
 
-    # 4. Tạo OTP 6 số ngẫu nhiên
+    # 4. Tạo OTP 6 số ngẫu nhiên & LƯU VÀO OTP_STORE (Hạn dùng 5 phút)
     otp_code = str(random.randint(100000, 999999))
+    otp_store[clean_email] = {
+        "code": otp_code,
+        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "user_id": current_user.id
+    }
 
     # 5. Gửi Email OTP
     try:
         await send_otp_email(clean_email, otp_code)
     except Exception as e:
+        # Nếu gửi mail lỗi thì xóa OTP vừa lưu để dọn dẹp
+        if clean_email in otp_store:
+            del otp_store[clean_email]
+            
         print("❌ Lỗi gửi Mail chi tiết:", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Lỗi kết nối tới máy chủ gửi mail, vui lòng kiểm tra lại cấu hình SMTP!"
+            detail=f"Lỗi kết nối tới máy chủ gửi mail: {str(e)}"
         )
 
     return {"message": f"Đã gửi mã OTP thành công tới {clean_email}"}
